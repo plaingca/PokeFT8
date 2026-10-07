@@ -2,6 +2,12 @@
 
 A Windows desktop companion that turns WSJT-X FT8 contacts into real Pokemon Red battles, powered by PyBoy. Callsigns name the trainers and Pokemon; transmitted and decoded messages become their moves.
 
+## Watch it in action
+
+[![Watch the PokeFT8 demo on YouTube](https://img.youtube.com/vi/gJwGsVVMZYM/hqdefault.jpg)](https://www.youtube.com/watch?v=gJwGsVVMZYM)
+
+[Watch the demo on YouTube](https://www.youtube.com/watch?v=gJwGsVVMZYM).
+
 ## Quick start
 
 Requires Windows, Python 3.13 with Tkinter, and your own supported English Pokemon Red ROM. No ROM, save file, or Nintendo game assets are included or downloaded.
