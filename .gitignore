@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.gb
+*.gbc
+*.sav
+*.ram
+data/
+*.log
+reference/
+stations.json
+*_probe.py
+verify_rom.py
+.ruff_cache/
+*.sqlite*
+.env*
+*.state
+*.zip
