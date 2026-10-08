@@ -12,7 +12,9 @@ A desktop companion for Windows, Linux and macOS that turns WSJT-X FT8 contacts 
 
 ### Portable downloads (no Python installation)
 
-Open the latest successful [Portable packages workflow run](https://github.com/plaingca/PokeFT8/actions/workflows/portable.yml) and download the artifact for your computer: **windows-x64**, **linux-x64**, **macos-arm64** (Apple Silicon), or **macos-x64** (Intel). GitHub requires signing in to download Actions artifacts. Each contains an archive and its SHA-256 checksum. Artifacts are retained for 30 days; version tags also attach all four archives to a draft GitHub release.
+Download your package from the [latest GitHub release](https://github.com/plaingca/PokeFT8/releases/latest): **windows-x64**, **linux-x64**, **macos-arm64** (Apple Silicon), or **macos-x64** (Intel). Each archive has a companion SHA-256 checksum file. Published release downloads do not require a GitHub login.
+
+Development snapshots are also available from successful [Portable packages workflow runs](https://github.com/plaingca/PokeFT8/actions/workflows/portable.yml). Actions downloads require signing in and are retained for 30 days; version tags attach all four archives to a draft release for publication.
 
 1. Extract the entire archive into a writable folder. Keep all included support files together.
 2. Launch `PokeFT8.exe` on Windows, `./PokeFT8` on Linux, or `PokeFT8.app` on macOS.
