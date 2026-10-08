@@ -8,7 +8,7 @@ project = Path(SPECPATH).parent
 datas = [(str(project / "reference" / "pokered.sym"), "reference")]
 binaries = []
 hiddenimports = []
-for package in ("pyboy", "sdl2dll"):
+for package in ("pyboy", "sdl2", "sdl2dll"):
     package_data, package_binaries, package_imports = collect_all(package)
     datas += package_data
     binaries += package_binaries
