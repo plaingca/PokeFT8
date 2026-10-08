@@ -181,12 +181,13 @@ class DemoTests(unittest.TestCase):
             self.e.handle(e | {field: value})
         self.assertEqual(self.e.attacks, 1)
 
-    def test_no_log_no_reward(self):
+    def test_acknowledgement_captures_without_fabricating_log(self):
         for t, p in sequence():
             if t < 42:
                 self.feed(p)
-        self.assertEqual(self.e.state, "await_log")
+        self.assertEqual(self.e.state, "success")
         self.assertEqual(self.dex.rows(), [])
+        self.assertEqual(len(self.dex.collection()), 1)
 
     def test_wrong_call_or_band_not_logged(self):
         for _, p in sequence()[:6]:

@@ -5,6 +5,8 @@ import re
 import sqlite3
 import time
 
+from ecology import choose_species, grid4
+
 
 def signal_power(snr):
     """Game balance, not RF power: -24..0 dB maps to 6..30 HP, capped."""
@@ -48,6 +50,50 @@ class Dex:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS contacts (id TEXT PRIMARY KEY, call TEXT, band TEXT, ended TEXT, grid TEXT)"
         )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS habitats (grid TEXT PRIMARY KEY, species TEXT, rarity TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS captures (id TEXT PRIMARY KEY, call TEXT, band TEXT, ended TEXT, grid TEXT, species TEXT, rarity TEXT)"
+        )
+
+    def habitat(self, grid, call):
+        grid = grid4(grid)
+        if not grid:
+            return choose_species("", call=call)
+        row = self.db.execute(
+            "SELECT species,rarity FROM habitats WHERE grid=?", (grid,)
+        ).fetchone()
+        if row:
+            return row
+        count = self.db.execute(
+            "SELECT COUNT(*) FROM contacts WHERE substr(upper(grid),1,4)=?", (grid,)
+        ).fetchone()[0]
+        species, rarity = choose_species(grid, count)
+        with self.db:
+            self.db.execute("INSERT INTO habitats VALUES (?,?,?)", (grid, species, rarity))
+        return species, rarity
+
+    def capture(self, attempt, call, frequency, grid, species, rarity):
+        with self.db:
+            result = self.db.execute(
+                "INSERT OR IGNORE INTO captures VALUES (?,?,?,?,?,?,?)",
+                (
+                    attempt,
+                    call,
+                    band(frequency),
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                    grid,
+                    species,
+                    rarity,
+                ),
+            )
+        return bool(result.rowcount)
+
+    def collection(self):
+        return self.db.execute(
+            "SELECT call,band,ended,grid,species FROM captures ORDER BY ended DESC"
+        ).fetchall()
 
     def add(self, e):
         # Both QSOLogged and LoggedADIF normalize to this identity, including repeat QSOs.
@@ -104,6 +150,17 @@ class Engine:
         self.transmitting = False
         self.tx_message = ""
         self.selected_target = ""
+        self.station_grids = {}
+        self.station_snr = {}
+        self.grid = ""
+        self.species = "PIDGEY"
+        self.rarity = "common"
+        self.watts = 50
+        self.progress = 0
+        self.acks = set()
+        self.has_report = False
+        self.capture_awarded = False
+        self.capture_due = None
 
     def emit(self, kind, **data):
         self.actions.append({"type": kind, **data})
@@ -124,6 +181,12 @@ class Engine:
         self.note = reason
         self.reply_expected = False
         self.reply_decoding = False
+        self.progress = 0
+        self.acks.clear()
+        self.has_report = False
+        self.capture_awarded = False
+        self.capture_due = None
+        self.grid = ""
         self.emit("reset")
 
     def begin_partner(self, call, snr=None, reason="Calling station"):
@@ -133,7 +196,57 @@ class Engine:
         self.last_reply = self.clock()
         self.attempt_started = dt.datetime.now(dt.timezone.utc)
         self.note = f"{reason}: {call}"
-        self.emit("encounter", call=call, own=self.own, snr=snr)
+        self.grid = self.station_grids.get(call, "")
+        self.species, self.rarity = self.dex.habitat(self.grid, call)
+        snr = self.station_snr.get(call) if snr is None else snr
+        self.emit(
+            "encounter",
+            call=call,
+            own=self.own,
+            snr=snr,
+            species=self.species,
+            grid=self.grid,
+            rarity=self.rarity,
+            watts=self.watts,
+        )
+
+    def progress_message(self, message, side, not_before=0):
+        stage, _ = exchange(message)
+        self.progress = max(
+            self.progress,
+            {"grid": 1, "report": 2, "roger-report": 3, "RRR": 4, "RR73": 5, "73": 5}.get(stage, 0),
+        )
+        if stage in ("report", "roger-report"):
+            self.has_report = True
+        if stage in ("RRR", "RR73", "73"):
+            self.acks.add((side, stage))
+        complete = (
+            ("rx", "RR73") in self.acks
+            or (("tx", "RR73") in self.acks and self.tx_snr is not None)
+            or (any(s == "RRR" for _, s in self.acks) and any(s == "73" for _, s in self.acks))
+        )
+        if complete and self.has_report:
+            self.award_capture(not_before)
+
+    def award_capture(self, not_before=0):
+        if self.capture_awarded:
+            return
+        if not_before > self.clock():
+            self.capture_due = not_before
+            self.note = "Sending final acknowledgement — preparing Poke Ball"
+            return
+        self.capture_due = None
+        self.capture_awarded = True
+        attempt = "|".join(
+            [self.instance, self.opponent, str(self.frequency), self.attempt_started.isoformat()]
+        )
+        self.dex.capture(
+            attempt, self.opponent, self.frequency, self.grid, self.species, self.rarity
+        )
+        self.state = "success"
+        self.reply_expected = False
+        self.note = "QSO acknowledged — capturing!"
+        self.emit("capture", call=self.opponent, not_before=not_before)
 
     @staticmethod
     def valid_call(call):
@@ -154,6 +267,20 @@ class Engine:
         self.attack(winner["message"], winner["snr"])
 
     def attack(self, message, snr):
+        known_grid = self.station_grids.get(self.opponent, "")
+        if not self.grid and known_grid:
+            self.grid = known_grid
+            self.species, self.rarity = self.dex.habitat(self.grid, self.opponent)
+            self.emit(
+                "identity",
+                call=self.opponent,
+                own=self.own,
+                snr=snr,
+                watts=self.watts,
+                species=self.species,
+                grid=self.grid,
+                rarity=self.rarity,
+            )
         self.rx_snr = snr
         stage, report = exchange(message)
         if report is not None:
@@ -178,10 +305,21 @@ class Engine:
             side="rx",
             move=message.split()[-1],
             damage=signal_power(self.rx_snr),
+            snr=snr,
+            target_hp={0: 100, 1: 80, 2: 55, 3: 25, 4: 10, 5: 5}[
+                max(
+                    self.progress,
+                    {"grid": 1, "report": 2, "roger-report": 3, "RRR": 4, "RR73": 5, "73": 5}.get(
+                        stage, 0
+                    ),
+                )
+            ],
+            not_before=self.clock() + 2,
         )
         if message.split()[-1] in ("RRR", "RR73", "73"):
             self.state = "await_log"
-            self.note = "Exchange finished — waiting for logged QSO"
+            self.note = "Final acknowledgement — awaiting completion"
+        self.progress_message(message, "rx")
 
     def handle(self, e):
         now = self.clock()
@@ -201,12 +339,23 @@ class Engine:
             self.frequency = e["frequency"]
             self.own = e["own"].upper()
             tx = (e.get("tx_message") or "").upper()
+            if (
+                self.transmitting
+                and not e["transmitting"]
+                and self.capture_due is not None
+                and now < self.capture_due - 0.5
+            ):
+                self.capture_due = None
+                self.acks = {ack for ack in self.acks if ack not in (("tx", "RR73"), ("tx", "73"))}
+                self.note = "Final transmission stopped early — capture deferred"
             self.transmitting = e["transmitting"]
             self.decoding = e["decoding"]
             self.tx_message = tx
             target = e.get("target", "").upper().strip()
             target_changed = target != self.selected_target
             self.selected_target = target
+            if self.valid_call(target) and grid4(e.get("grid")):
+                self.station_grids[target] = grid4(e["grid"])
             started_tx = e["transmitting"] and not self.was_transmitting
             self.was_transmitting = e["transmitting"]
             words = tx.split()
@@ -256,11 +405,25 @@ class Engine:
                     number=self.attacks,
                     damage=signal_power(self.tx_snr),
                     tx_snr=self.tx_snr,
-                    not_before=now + 8.0,
+                    not_before=now + 10.0,
+                    target_hp={0: 100, 1: 80, 2: 55, 3: 25, 4: 10, 5: 5}[
+                        max(
+                            self.progress,
+                            {
+                                "grid": 1,
+                                "report": 2,
+                                "roger-report": 3,
+                                "RRR": 4,
+                                "RR73": 5,
+                                "73": 5,
+                            }.get(exchange(tx)[0], 0),
+                        )
+                    ],
                 )
                 self.reply_expected = words[-1] != "73"
                 self.reply_decoding = False
                 self.last_message = tx
+                self.progress_message(tx, "tx", now + 13.2)
             if self.reply_expected and not e["transmitting"]:
                 if e["decoding"]:
                     self.reply_decoding = True
@@ -287,6 +450,13 @@ class Engine:
             ):
                 return
             words = e["message"].upper().split()
+            if len(words) >= 3:
+                sender = words[-2] if words[0] == "CQ" else words[1]
+                sender = sender if self.valid_call(sender) else ""
+                if sender:
+                    self.station_snr[sender] = e["snr"]
+                    if exchange(e["message"])[0] == "grid":
+                        self.station_grids[sender] = grid4(words[-1])
             if (
                 len(words) < 3
                 or words[0] != self.own
@@ -326,18 +496,19 @@ class Engine:
             ):
                 return
             if (
-                self.state in ("battle", "await_log")
+                self.state in ("battle", "await_log", "success")
                 and e["call"].upper() == self.opponent
                 and e["mode"].upper() == "FT8"
                 and band(e["frequency"]) == band(self.frequency)
             ):
                 if self.dex.add(e):
-                    self.state = "success"
-                    self.note = "QSO logged — callsign added to Pokédex"
-                    self.emit("success", call=self.opponent)
+                    self.award_capture()
+                    self.note = "Captured — also confirmed by WSJT-X log"
 
     def poll(self):
         now = self.clock()
+        if self.capture_due is not None and now >= self.capture_due and not self.transmitting:
+            self.award_capture()
         if self.deadline is not None and now >= self.deadline:
             self.finish_batch()
         if (

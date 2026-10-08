@@ -8,5 +8,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: python -m unittest -v test_demo
-      - run: python -m compileall -q app.py engine.py protocol.py rom.py game_audio.py demo.py prepare_reference.py
+      - run: python -m unittest discover -v
+      - run: python -m compileall -q app.py engine.py protocol.py rom.py game_audio.py demo.py prepare_reference.py ecology.py

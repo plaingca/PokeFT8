@@ -14,6 +14,7 @@ from PIL import ImageDraw
 from pyboy import PyBoy
 from pyboy.plugins.game_wrapper_pokemon_gen1_constants import POKEMON_TEXT_ENCODING
 
+from ecology import snr_level, watts_level
 from game_audio import GameAudio
 
 ROOT = Path(__file__).resolve().parent
@@ -58,6 +59,12 @@ class Red:
         self.selecting_move = False
         self.call = ""
         self.own = "N0CALL"
+        self.watts = 50
+        self.snr = None
+        self.species = "PIDGEY"
+        self.target_hp = 100
+        self.capturing = False
+        self.capture_seen = False
         self.state_path = ROOT / "data/grass-red-audio-2.8.1.state"
         self.state_path.parent.mkdir(exist_ok=True)
         if not self.state_path.exists():
@@ -72,6 +79,24 @@ class Red:
         self.p.hook_register(None, "DisplayBattleMenu", self._menu, None)
         self.p.hook_register(None, "ApplyDamageToEnemyPokemon", self._enemy_damage, None)
         self.p.hook_register(None, "ApplyDamageToPlayerPokemon", self._player_damage, None)
+        self.p.hook_register(None, "ItemUseBall.loop", self._guarantee_capture, None)
+        self.p.hook_register(None, "AskName", self._skip_nickname, None)
+
+    def _guarantee_capture(self, _):
+        if self.capturing:
+            self.capture_seen = True
+            self.p.register_file.PC = self.p.symbol_lookup("ItemUseBall.captured")[1]
+
+    def _skip_nickname(self, _):
+        if self.capturing:
+            # Return from AskName without entering its blocking naming menu.
+            self.name("wPartyMonNicks", self.own)
+            addr = self.p.symbol_lookup("wPartyMonNicks")[1] + 11
+            encoded = [POKEMON_TEXT_ENCODING.get(c, 0x7F) for c in self.call[:10]]
+            self.p.memory[addr : addr + 11] = encoded + [0x50] * (11 - len(encoded))
+            regs = self.p.register_file
+            regs.PC = self.p.memory[regs.SP] | (self.p.memory[regs.SP + 1] << 8)
+            regs.SP += 2
 
     def theme_moves(self):
         # Override only emulated ROM bytes; retain every entry's size and terminator.
@@ -166,10 +191,14 @@ class Red:
     def _menu(self, _):
         self.entered_menu = True
         self.selecting_move = True
+        if self.initialized_battle:
+            self.write16("wEnemyMonHP", min(self.read16("wEnemyMonHP"), self.target_hp))
+            self.write("wEnemyMonLevel", snr_level(self.snr))
+            self.write("wBattleMonLevel", watts_level(self.watts))
 
     def _enemy_damage(self, _):
         hp = self.read16("wEnemyMonHP")
-        self.write16("wDamage", hp if self.finishing else min(self.attack_damage, max(0, hp - 1)))
+        self.write16("wDamage", max(0, hp - self.target_hp))
         self.damage_events += 1
 
     def _player_damage(self, _):
@@ -227,9 +256,19 @@ class Red:
         self.initialized_battle = False
         self.menu_settle = 0
         self.error = ""
+        self.capturing = False
+        self.capture_seen = False
+        self.target_hp = 100
 
     def action(self, event):
         kind = event["type"]
+        if kind == "identity":
+            # Reveal the grid's species once a previously unknown grid is decoded.
+            pending, hp = self.pending.copy(), self.target_hp
+            self.action(event | {"type": "encounter"})
+            self.pending = pending
+            self.target_hp = hp
+            return
         if kind in ("cq", "reset"):
             self.load_grass()
             self.mode = "cq" if kind == "cq" else "idle"
@@ -237,16 +276,32 @@ class Red:
         elif kind == "encounter":
             self.load_grass()
             self.call = event["call"]
+            self.watts = event.get("watts", 50)
+            self.snr = event.get("snr")
+            self.species = event.get("species", "PIDGEY")
             self.mode = "battle"
             self.configure_names(event)
             self.battle_started = self.frame
             self.move_started = self.frame
             self.damage_events = 0
             self.completed_rounds = 0
-            self.p.game_wrapper.start_trainer_battle("YOUNGSTER", 1)
+            self.p.game_wrapper.set_party([])
+            self.p.game_wrapper.add_pokemon(
+                "PIKACHU",
+                level=watts_level(self.watts),
+                moves=["SWIFT"],
+                nickname=self.own,
+                hp=100,
+                max_hp=100,
+            )
+            self.p.game_wrapper.set_inventory([("POKE_BALL", 1)])
+            # Avoid the species encyclopedia prompt; the companion keeps the collection.
+            addr = self.p.symbol_lookup("wPokedexOwned")[1]
+            self.p.memory[addr : addr + 19] = [255] * 19
+            self.p.game_wrapper.start_wild_battle(self.species, snr_level(self.snr))
         elif kind == "attack":
             self.pending.append(event)
-        elif kind == "success":
+        elif kind in ("success", "capture"):
             self.pending.append(event)
 
     def tick(self, count=4):
@@ -276,7 +331,7 @@ class Red:
                         self.write16("wBattleMonMaxHP", 100)
                         self.write16("wBattleMonHP", 100)
                         self.write16("wEnemyMonMaxHP", 100)
-                        self.write16("wEnemyMonHP", 100)
+                        self.write16("wEnemyMonHP", self.target_hp)
                         self.initialized_battle = True
                     else:
                         self.completed_rounds += 1
@@ -292,14 +347,23 @@ class Red:
                         self.advance_frame()
                         continue
                     event = self.pending.popleft()
-                    self.finishing = event["type"] == "success"
+                    self.finishing = event["type"] in ("success", "capture")
+                    self.capturing = self.finishing
+                    if event.get("snr") is not None:
+                        self.snr = event["snr"]
+                    self.write("wEnemyMonLevel", snr_level(self.snr))
+                    self.write("wBattleMonLevel", watts_level(self.watts))
+                    self.target_hp = min(self.target_hp, event.get("target_hp", 100))
                     self.active_side = event.get("side", "tx")
                     self.message_move(event.get("move", "LOG!"))
                     self.attack_damage = event.get("damage", 12)
                     self.counter_damage = event.get("counter_damage", 12)
                     self.waiting = False
                     self.move_started = self.frame
-                    self.write("wCurrentMenuItem", 0)
+                    self.write("wCurrentMenuItem", 1 if self.capturing else 0)
+                    if self.capturing:
+                        self.selecting_move = False
+                        self.write("wListScrollOffset", 0)
                     self.write("wBattleMonStatus", 0)
                     self.write("wEnemyMonStatus", 0)
                     # Health persists across actual message turns.
@@ -307,7 +371,7 @@ class Red:
                 elif self.frame % 24 == 0:
                     self.p.button("a")
                 if self.initialized_battle and self.read("wIsInBattle") == 0:
-                    self.mode = "victory"
+                    self.mode = "victory" if self.capture_seen else "idle"
                 if not self.waiting and self.frame - self.move_started > 3600:
                     self.error = "ROM scene timed out. Restart demo to recover."
                     return
@@ -324,10 +388,23 @@ class Red:
             # Keep the emulator's automatic menu navigation out of the presentation.
             # Attack narration remains visible as soon as a message turn starts.
             draw = ImageDraw.Draw(frame)
+            # The ROM does not redraw the foe HUD for every receive-only turn.
+            # Reflect the same HP value used by the capture/damage routines.
+            maximum = max(1, self.read16("wEnemyMonMaxHP"))
+            width = round(48 * self.read16("wEnemyMonHP") / maximum)
+            draw.rectangle((32, 19, 79, 20), fill="white")
+            if width:
+                draw.rectangle((32, 19, 31 + min(48, width), 20), fill="black")
             draw.rectangle((0, 96, 159, 143), fill="white")
             draw.rectangle((2, 98, 157, 141), outline="black", width=1)
-            draw.text((8, 102), self.radio_phase, fill="black")
-            draw.text((8, 115), self.radio_detail, fill="black")
+            next_move = self.pending[0] if self.pending else None
+            if next_move and next_move["type"] == "attack":
+                actor = self.own if next_move.get("side") == "tx" else self.call
+                draw.text((8, 102), actor[:10] + " readies", fill="black")
+                draw.text((8, 115), next_move.get("move", "") + "...", fill="black")
+            else:
+                draw.text((8, 102), "Sizing up " + self.call[:8], fill="black")
+                draw.text((8, 115), "Listening for a move", fill="black")
             draw.rectangle((8, 132, 151, 136), outline="black")
             fill = int(140 * self.slot_fraction)
             if fill:

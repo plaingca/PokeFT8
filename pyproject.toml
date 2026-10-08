@@ -1,7 +1,7 @@
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-include = ["app.py", "engine.py", "rom.py", "game_audio.py", "protocol.py", "demo.py", "test_demo.py", "verify_session.py", "prepare_reference.py"]
+include = ["app.py", "engine.py", "rom.py", "game_audio.py", "protocol.py", "demo.py", "test_*.py", "verify_session.py", "prepare_reference.py", "ecology.py"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]

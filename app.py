@@ -2,6 +2,7 @@
 
 import argparse
 import datetime as dt
+import json
 import socket
 import time
 import tkinter as tk
@@ -11,6 +12,7 @@ from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
 
 from demo import real_sequence as sequence
+from ecology import snr_level, watts_level
 from engine import Dex, Engine, band
 from protocol import decode
 from rom import ROOT, Red
@@ -40,11 +42,19 @@ class App:
         self.bad_packets = 0
         self.messages = []
         self.connection_error = ""
+        self.power_watts = 50
+        try:
+            saved = json.loads((ROOT / "data/settings.json").read_text(encoding="utf-8"))
+            value = float(saved.get("watts", 50))
+            if 0.1 <= value <= 1500:
+                self.power_watts = value
+        except (OSError, ValueError, TypeError):
+            pass
         self.red = Red(args.rom, clock=self.session_clock)
         self.root.title("PokéFT8 — Pokémon Red × amateur radio")
         self.root.configure(bg=BG)
-        self.root.geometry("1120x810")
-        self.root.minsize(1040, 770)
+        self.root.geometry("1120x850")
+        self.root.minsize(1040, 820)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         style = ttk.Style()
         style.theme_use("clam")
@@ -71,7 +81,7 @@ class App:
         )
         tk.Label(
             top,
-            text="  POKÉMON RED  /  QSO BATTLES",
+            text="  POKÉMON RED  /  FT8 ENCOUNTERS",
             font=("Consolas", 12),
             fg=MUTED,
             bg=BG,
@@ -122,6 +132,25 @@ class App:
         self.paused = False
         self.transport = tk.Label(controls, text="", fg=MUTED, bg=BG, font=("Consolas", 10))
         self.transport.pack(side="right")
+        settings = tk.Frame(root, bg=BG)
+        settings.pack(fill="x", padx=24, pady=(0, 8))
+        tk.Label(settings, text="TX power (manual):", bg=BG, fg=MUTED).pack(side="left")
+        self.power_var = tk.StringVar(value=str(self.power_watts))
+        self.power_input = tk.Spinbox(
+            settings,
+            from_=0.1,
+            to=1500,
+            increment=1,
+            width=7,
+            textvariable=self.power_var,
+            command=self.set_power,
+        )
+        self.power_input.pack(side="left", padx=6)
+        self.power_input.bind("<Return>", lambda _: self.set_power())
+        self.power_input.bind("<FocusOut>", lambda _: self.set_power())
+        tk.Label(settings, text="W  ·  Weak signals = stronger encounters", bg=BG, fg=MUTED).pack(
+            side="left"
+        )
         middle = tk.Frame(root, bg=BG)
         middle.pack(fill="both", expand=True, padx=24)
         left = tk.Frame(middle, bg=PANEL, padx=16, pady=14)
@@ -142,6 +171,8 @@ class App:
             font=("Segoe UI", 10),
             fg=MUTED,
             bg=PANEL,
+            wraplength=480,
+            justify="left",
         )
         self.game_note.pack(anchor="w", pady=(10, 0))
         right = tk.Frame(middle, bg=BG, padx=20)
@@ -177,11 +208,11 @@ class App:
             self.candidates.heading(col, text=title)
             self.candidates.column(col, width=width)
         self.candidates.pack(fill="x")
-        self.table_label(right, "CALLSIGN POKÉDEX · logged contacts")
+        self.table_label(right, "POKÉDEX · captured contacts")
         self.dex_table = ttk.Treeview(
-            right, columns=("call", "band", "grid"), show="headings", height=4
+            right, columns=("call", "species", "grid"), show="headings", height=4
         )
-        for col, width in [("call", 190), ("band", 80), ("grid", 100)]:
+        for col, width in [("call", 130), ("species", 145), ("grid", 70)]:
             self.dex_table.heading(col, text=col.upper())
             self.dex_table.column(col, width=width)
         self.dex_table.pack(fill="x")
@@ -223,10 +254,24 @@ class App:
         if hasattr(self, "engine"):
             self.engine.dex.db.close()
         self.engine = Engine(Dex(path), clock=self.session_clock)
+        self.engine.watts = self.power_watts
         self.last_rows = None
         self.packet_count = self.bad_packets = 0
         self.messages = []
         self.red.action({"type": "reset"})
+
+    def set_power(self):
+        try:
+            value = float(self.power_var.get())
+            if not 0.1 <= value <= 1500:
+                raise ValueError
+        except ValueError:
+            self.power_var.set(str(self.power_watts))
+            return
+        self.power_watts = value
+        self.engine.watts = value
+        self.red.watts = value
+        (ROOT / "data/settings.json").write_text(json.dumps({"watts": value}), encoding="utf-8")
 
     def session_clock(self):
         if self.mode == "demo":
@@ -325,8 +370,8 @@ class App:
                     self.messages.append(
                         f"{action.get('side', 'rx').upper()} {'MISS' if action.get('missed') else 'MOVE'}  {action['message']}"
                     )
-                if action["type"] == "success":
-                    self.messages.append(f"LOGGED     {action['call']} added to Pokédex")
+                if action["type"] == "capture":
+                    self.messages.append(f"CAPTURE    {action['call']} added to Pokédex")
             # Game Boy hardware runs at ~59.7275 Hz, independent of Tk redraw cost.
             self.frame_budget += frame_elapsed * (4194304 / 70224)
             frames = int(self.frame_budget)
@@ -348,7 +393,7 @@ class App:
         if stale:
             phase, detail = "RADIO STANDBY", "No fresh telemetry"
         elif e.state == "success":
-            phase, detail = "CONTACT LOGGED", "Finishing battle"
+            phase, detail = "CONTACT CAPTURED", "Poké Ball capture"
         elif e.transmitting:
             phase = "TRANSMITTING"
             detail = (e.tx_message.split()[-1] if e.tx_message else "CQ") + f"  {remaining:04.1f}s"
@@ -366,17 +411,26 @@ class App:
         title = {
             "idle": "ROUTE 1 • STANDBY",
             "cq": "ROUTE 1 • CALLING CQ",
-            "battle": "TRAINER BATTLE",
-            "await_log": "FINAL EXCHANGE • AWAITING LOG",
-            "success": "CONTACT COMPLETE",
+            "battle": "WILD ENCOUNTER",
+            "await_log": "FINAL EXCHANGE • AWAITING 73",
+            "success": "CONTACT CAPTURED",
         }[e.state]
         self.scene_title.configure(text=title)
         self.call.configure(text=e.opponent or ("CQ CQ CQ" if e.state == "cq" else "READY"))
         self.stage.configure(text=f"{phase} · {detail}\n{e.note}")
         self.game_note.configure(
-            text=f"{e.own or self.red.own}  vs  {e.opponent or chr(8212)}\nCallsign trainers and Pokémon · original sprites"
+            text=f"Your level {watts_level(self.power_watts)} = {self.power_watts:g} W (manual)\n"
+            + (
+                f"{e.species} · {e.grid or 'unknown grid / callsign fallback'} · {e.rarity}"
+                if e.opponent
+                else "Explore grids and collect contacts"
+            )
         )
-        heard = "unknown" if e.rx_snr is None else f"{e.rx_snr:+d} dB"
+        heard = (
+            "unknown (level provisional)"
+            if e.rx_snr is None
+            else f"{e.rx_snr:+d} dB · level {snr_level(e.rx_snr)}"
+        )
         reported = "unknown" if e.tx_snr is None else f"{e.tx_snr:+d} dB (last report)"
         self.rx.configure(
             text=f"{e.last_message}\nYou hear them: {heard}\nThey hear you: {reported}\n{e.exchange_stage or chr(8212)}"
@@ -394,17 +448,17 @@ class App:
                     f"{c['snr']:+d} dB",
                 ),
             )
-        rows = e.dex.rows()
+        rows = e.dex.collection()
         if rows != self.last_rows:
             self.dex_table.delete(*self.dex_table.get_children())
             unique = {}
             for row in rows:
                 unique.setdefault(row[0], row)
-            for call, b, _, grid in unique.values():
-                self.dex_table.insert("", "end", values=(call, b, grid))
+            for call, b, _, grid, species in unique.values():
+                self.dex_table.insert("", "end", values=(call, species, grid))
             self.last_rows = rows
         self.dex_caption.configure(
-            text=f"{len(set(r[0] for r in rows))} unique callsigns · {len(rows)} QSOs · "
+            text=f"{len(set(r[4] for r in rows))}/151 species · {len(rows)} captures · "
             + ("demo log resets on replay" if self.mode == "demo" else "saved locally")
         )
         self.feed.configure(text="\n".join(self.messages[-6:]))
