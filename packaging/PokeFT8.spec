@@ -10,6 +10,16 @@ binaries = []
 hiddenimports = []
 for package in ("pyboy", "sdl2", "sdl2dll"):
     package_data, package_binaries, package_imports = collect_all(package)
+    if sys.platform == "darwin" and package == "sdl2dll":
+        # Optional mixer/image frameworks depend on a top-level SDL2 alias.
+        # That alias collides with the Python sdl2 package on case-insensitive
+        # Mac filesystems. This app uses only the core SDL2 framework.
+        def core_sdl_file(item):
+            path = Path(item[0]).as_posix()
+            return "/dll/" not in path or "/dll/SDL2.framework/" in path
+
+        package_data = [item for item in package_data if core_sdl_file(item)]
+        package_binaries = [item for item in package_binaries if core_sdl_file(item)]
     datas += package_data
     binaries += package_binaries
     hiddenimports += package_imports
