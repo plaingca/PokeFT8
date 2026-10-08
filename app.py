@@ -7,7 +7,7 @@ import socket
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
@@ -285,7 +285,7 @@ class App:
         # The staged session always uses an in-memory dex. Real log is untouched.
         self.mode = "demo"
         self.new_engine(":memory:")
-        self.timeline = sequence()
+        self.timeline = sequence(missed_reply=True)
         self.index = 0
         self.started = time.monotonic()
         self.paused = False
@@ -501,9 +501,29 @@ def main():
     parser.add_argument("--rom", type=Path, default=ROOT / "Pokemon Red.gb")
     parser.add_argument("--port", type=int, default=2237)
     parser.add_argument("--live", action="store_true", help="Start listening to WSJT-X immediately")
+    parser.add_argument(
+        "--self-test", type=Path, help="Write a ROM-free startup check to this JSON file"
+    )
     args = parser.parse_args()
+    if args.self_test:
+        from package_check import startup_check
+
+        startup_check(args.self_test)
+        return
     root = tk.Tk()
     try:
+        if not args.rom.is_file():
+            root.withdraw()
+            selected = filedialog.askopenfilename(
+                parent=root,
+                title="Select your English Pokemon Red ROM",
+                filetypes=[("Game Boy ROM", "*.gb"), ("All files", "*")],
+            )
+            if not selected:
+                root.destroy()
+                return
+            args.rom = Path(selected)
+            root.deiconify()
         app = App(root, args)
         if args.live:
             app.listen()

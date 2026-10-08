@@ -1,6 +1,6 @@
 # PokeFT8
 
-A Windows desktop companion that turns WSJT-X FT8 contacts into wild Pokemon Red encounters, powered by PyBoy. Callsigns name the Pokemon, grid squares choose their species, and completed exchanges earn Poke Ball captures.
+A desktop companion for Windows, Linux and macOS that turns WSJT-X FT8 contacts into wild Pokemon Red encounters, powered by PyBoy. Callsigns name the Pokemon, grid squares choose their species, and completed exchanges earn Poke Ball captures.
 
 ## Watch it in action
 
@@ -9,6 +9,20 @@ A Windows desktop companion that turns WSJT-X FT8 contacts into wild Pokemon Red
 [Watch the demo on YouTube](https://www.youtube.com/watch?v=gJwGsVVMZYM).
 
 ## Quick start
+
+### Portable downloads (no Python installation)
+
+Open the latest successful [Portable packages workflow run](https://github.com/plaingca/PokeFT8/actions/workflows/portable.yml) and download the artifact for your computer: **windows-x64**, **linux-x64**, **macos-arm64** (Apple Silicon), or **macos-x64** (Intel). GitHub requires signing in to download Actions artifacts. Each contains an archive and its SHA-256 checksum. Artifacts are retained for 30 days; version tags also attach all four archives to a draft GitHub release.
+
+1. Extract the entire archive into a writable folder. Keep all included support files together.
+2. Launch `PokeFT8.exe` on Windows, `./PokeFT8` on Linux, or `PokeFT8.app` on macOS.
+3. Place your own supported `Pokemon Red.gb` beside the executable (beside the `.app` on macOS), or select it in the file picker on startup.
+
+The default launch runs the demo. Pass `--live` to listen to WSJT-X immediately, or use **Listen to WSJT-X** in the app. Settings, contacts and generated emulator states remain in a local `data/` folder beside the executable/app. The supplied Python, Tk, emulator, SDL2 and symbols do not need a separate installation. No ROM, saves, contacts or video recordings are distributed.
+
+Packages target Windows x64, desktop Linux x64 with glibc 2.35 or newer (Ubuntu 22.04 or newer), and macOS 15 or newer on the matching architecture. Linux needs a graphical desktop with X11/XWayland and standard desktop/audio libraries. Builds are unsigned: Windows may display SmartScreen, and macOS may require approving the app in **System Settings > Privacy & Security**. Keep the portable folder in a user-writable location.
+
+### Run from source on Windows
 
 Requires Windows, Python 3.13 with Tkinter, and your own supported English Pokemon Red ROM. No ROM, save file, or Nintendo game assets are included or downloaded.
 
@@ -54,7 +68,7 @@ When the grid is unknown, a deterministic callsign-based common species appears 
 
 **Restart demo** runs a roughly two-minute simulated exchange using real 15-second FT8 slots. **Pause** freezes the demo. **Listen to WSJT-X** switches to live telemetry. **Sound: Off / On** toggles Game Boy audio, muted on startup. **Save frame** writes a screenshot under `data/`.
 
-Outgoing moves build up for ten seconds and decoded replies for two seconds before their animation is eligible to play. The hidden selection panel shows the Pokemon readying its message move or sizing up its opponent, filling the slot instead of displaying a generic wait. Radio phase and slot progress remain in the companion UI. Audio uses the Game Boy clock independently of screen redraws and continues through radio waits. Original Pokemon graphics and move animations are retained. In-game names are limited to ten characters; full callsigns remain in the dashboard and log.
+Automatic button presses pace the native battle narration across the radio slots. Move text starts as soon as its turn can be selected; the attack animation waits until ten seconds into an outgoing transmission or two seconds after a decoded reply. The ROM keeps the completed move's text visible until the next turn, instead of showing a waiting or sizing-up screen. Missing an expected reply after a complete decode cycle produces Red's actual zero-damage "attack missed" result; the feed identifies it as inferred. The demo includes one such miss followed by a retry. Radio phase and slot progress remain in the companion UI. Audio uses the Game Boy clock independently of screen redraws and continues through the native button prompts. Original Pokemon graphics and move animations are retained. In-game names are limited to ten characters; full callsigns remain in the dashboard and log.
 
 Demo contacts are in memory. Live contacts are saved in `data/contacts.sqlite3`. All data, captures, ROMs and generated save states are ignored by Git. To rebuild the starting scene, close the app and remove only `data/grass-red-audio-2.8.1.state`.
 
@@ -66,6 +80,8 @@ Demo contacts are in memory. Live contacts are saved in `data/contacts.sqlite3`.
 ```
 
 The unit tests require only Python and run in GitHub Actions without a ROM. The integration replay requires the local ROM and symbols; it checks battle completion, callsign naming, timing and queue bounds and writes screenshots under `data/`.
+
+To build a portable package on its target OS, install `requirements-build.txt`, run `python prepare_reference.py`, then run `python packaging/build_package.py --label windows-x64` (or the matching Linux/macOS label). On a headless Linux builder, run the build under `xvfb-run -a`. The builder verifies pinned symbols, checks for excluded game/private files, launches the frozen executable from another directory to test Tk/SDL/emulator imports, and writes the archive plus checksum under `artifacts/`. The Actions workflow runs these checks on all four native runner architectures for every main push, pull request or manual dispatch. Pushing a `v*` tag creates or updates a draft release; it does not publish that release automatically.
 
 `engine.py` owns the QSO state machine; `protocol.py` handles WSJT-X binary packets; `rom.py` controls the emulator; `game_audio.py` queues audio; `app.py` provides the desktop UI. `demo.py` includes realistic and compressed test fixtures.
 

@@ -10,14 +10,13 @@ import time
 from collections import deque
 from pathlib import Path
 
-from PIL import ImageDraw
 from pyboy import PyBoy
 from pyboy.plugins.game_wrapper_pokemon_gen1_constants import POKEMON_TEXT_ENCODING
 
 from ecology import snr_level, watts_level
 from game_audio import GameAudio
+from runtime_paths import BUNDLE_ROOT, ROOT
 
-ROOT = Path(__file__).resolve().parent
 RED_SHA1 = "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
 
 
@@ -37,7 +36,7 @@ class Red:
             sound_emulated=True,
             sound_sample_rate=48000,
             ram_file=io.BytesIO(bytes(32768)),
-            symbols=str(ROOT / "reference/pokered.sym"),
+            symbols=str(BUNDLE_ROOT / "reference/pokered.sym"),
         )
         self.p.set_emulation_speed(0)
         self.mode = "idle"
@@ -65,6 +64,13 @@ class Red:
         self.target_hp = 100
         self.capturing = False
         self.capture_seen = False
+        self.prompt = None
+        self.prompt_return = None
+        self.prompt_started = 0
+        self.impact_due = 0
+        self.active_missed = False
+        self.missed_events = 0
+        self.menu_scene = None
         self.state_path = ROOT / "data/grass-red-audio-2.8.1.state"
         self.state_path.parent.mkdir(exist_ok=True)
         if not self.state_path.exists():
@@ -77,6 +83,8 @@ class Red:
         self.p.hook_register(None, "ExecutePlayerMove", self._player_turn, None)
         self.p.hook_register(None, "ExecuteEnemyMove", self._enemy_turn, None)
         self.p.hook_register(None, "DisplayBattleMenu", self._menu, None)
+        self.p.hook_register(None, "HandleIfPlayerMoveMissed", self._hit_test, "tx")
+        self.p.hook_register(None, "HandleIfEnemyMoveMissed", self._hit_test, "rx")
         self.p.hook_register(None, "ApplyDamageToEnemyPokemon", self._enemy_damage, None)
         self.p.hook_register(None, "ApplyDamageToPlayerPokemon", self._player_damage, None)
         self.p.hook_register(None, "ItemUseBall.loop", self._guarantee_capture, None)
@@ -189,12 +197,48 @@ class Red:
         return self.p.memory[self.p.symbol_lookup(name)[1]]
 
     def _menu(self, _):
+        # Hold the ROM's completed move text at a native button prompt. The next
+        # real message dismisses it; music and the Game Boy clock keep running.
+        if self.initialized_battle and self._pace_prompt("result"):
+            return
+        self.menu_scene = self.p.screen.image.copy()
         self.entered_menu = True
         self.selecting_move = True
         if self.initialized_battle:
             self.write16("wEnemyMonHP", min(self.read16("wEnemyMonHP"), self.target_hp))
             self.write("wEnemyMonLevel", snr_level(self.snr))
             self.write("wBattleMonLevel", watts_level(self.watts))
+
+    def _pace_prompt(self, kind):
+        if self.prompt_return == kind:
+            self.prompt_return = None
+            self.prompt = None
+            return False
+        if kind == "impact" and self.clock() >= self.impact_due:
+            return False
+        # Insert a call to the cartridge's input loop, returning to this hook
+        # once A is pressed. No emulator frames or audio samples are skipped.
+        regs = self.p.register_file
+        address = regs.PC
+        regs.SP -= 2
+        self.p.memory[regs.SP] = address & 255
+        self.p.memory[regs.SP + 1] = address >> 8
+        regs.PC = self.p.symbol_lookup("WaitForTextScrollButtonPress")[1]
+        self.prompt = self.prompt_return = kind
+        self.prompt_started = self.clock()
+        self.p.button_release("a")
+        return True
+
+    def _hit_test(self, side):
+        if side != self.active_side or self._pace_prompt("impact"):
+            return
+        if self.active_missed:
+            # Use Red's actual failure branch, not a zero-damage successful hit.
+            self.write("wMoveMissed", 1)
+            self.write16("wDamage", 0)
+            self.write("wCriticalHitOrOHKO", 0)
+            self.write("wDamageMultipliers", 10)
+            self.missed_events += 1
 
     def _enemy_damage(self, _):
         hp = self.read16("wEnemyMonHP")
@@ -259,6 +303,11 @@ class Red:
         self.capturing = False
         self.capture_seen = False
         self.target_hp = 100
+        self.prompt = self.prompt_return = None
+        self.impact_due = 0
+        self.active_missed = False
+        self.missed_events = 0
+        self.menu_scene = None
 
     def action(self, event):
         kind = event["type"]
@@ -323,6 +372,18 @@ class Red:
                 if at == 96:
                     self.p.button_release("left")
             elif self.mode == "battle":
+                if self.prompt:
+                    result_read_time = 1.8 if self.active_missed else 0.6
+                    ready = (
+                        self.clock() >= self.impact_due
+                        if self.prompt == "impact"
+                        else bool(self.pending)
+                        and self.clock() - self.prompt_started >= result_read_time
+                    )
+                    if ready and self.frame % 6 == 0:
+                        self.p.button("a")
+                    self.advance_frame()
+                    continue
                 if self.entered_menu:
                     self.entered_menu = False
                     self.menu_settle = 16
@@ -343,9 +404,6 @@ class Red:
                     if not self.pending:
                         self.advance_frame()  # Music keeps running at the hidden menu.
                         continue
-                    if self.clock() < self.pending[0].get("not_before", 0):
-                        self.advance_frame()
-                        continue
                     event = self.pending.popleft()
                     self.finishing = event["type"] in ("success", "capture")
                     self.capturing = self.finishing
@@ -355,6 +413,8 @@ class Red:
                     self.write("wBattleMonLevel", watts_level(self.watts))
                     self.target_hp = min(self.target_hp, event.get("target_hp", 100))
                     self.active_side = event.get("side", "tx")
+                    self.impact_due = event.get("not_before", 0)
+                    self.active_missed = event.get("missed", False)
                     self.message_move(event.get("move", "LOG!"))
                     self.attack_damage = event.get("damage", 12)
                     self.counter_damage = event.get("counter_damage", 12)
@@ -368,7 +428,7 @@ class Red:
                     self.write("wEnemyMonStatus", 0)
                     # Health persists across actual message turns.
                     self.p.button("a")
-                elif self.frame % 24 == 0:
+                elif self.frame % (6 if self.selecting_move else 24) == 0:
                     self.p.button("a")
                 if self.initialized_battle and self.read("wIsInBattle") == 0:
                     self.mode = "victory" if self.capture_seen else "idle"
@@ -384,31 +444,10 @@ class Red:
 
     def image(self):
         frame = self.p.screen.image.copy()
-        if self.mode == "battle" and self.selecting_move:
-            # Keep the emulator's automatic menu navigation out of the presentation.
-            # Attack narration remains visible as soon as a message turn starts.
-            draw = ImageDraw.Draw(frame)
-            # The ROM does not redraw the foe HUD for every receive-only turn.
-            # Reflect the same HP value used by the capture/damage routines.
-            maximum = max(1, self.read16("wEnemyMonMaxHP"))
-            width = round(48 * self.read16("wEnemyMonHP") / maximum)
-            draw.rectangle((32, 19, 79, 20), fill="white")
-            if width:
-                draw.rectangle((32, 19, 31 + min(48, width), 20), fill="black")
-            draw.rectangle((0, 96, 159, 143), fill="white")
-            draw.rectangle((2, 98, 157, 141), outline="black", width=1)
-            next_move = self.pending[0] if self.pending else None
-            if next_move and next_move["type"] == "attack":
-                actor = self.own if next_move.get("side") == "tx" else self.call
-                draw.text((8, 102), actor[:10] + " readies", fill="black")
-                draw.text((8, 115), next_move.get("move", "") + "...", fill="black")
-            else:
-                draw.text((8, 102), "Sizing up " + self.call[:8], fill="black")
-                draw.text((8, 115), "Listening for a move", fill="black")
-            draw.rectangle((8, 132, 151, 136), outline="black")
-            fill = int(140 * self.slot_fraction)
-            if fill:
-                draw.rectangle((10, 133, 10 + fill, 135), fill="black")
+        if self.mode == "battle" and self.selecting_move and self.menu_scene is not None:
+            # The automatic selector is brief; retain the native narration while
+            # it is pressed instead of replacing it with a waiting screen.
+            frame.paste(self.menu_scene.crop((0, 96, 160, 144)), (0, 96))
         return frame
 
     def close(self):

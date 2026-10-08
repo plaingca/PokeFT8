@@ -6,13 +6,16 @@ from protocol import decode
 from rom import ROOT, Red
 
 
-def main():
+def verify(missed_reply=False):
     now = [0.0]
     engine = Engine(Dex(":memory:"), clock=lambda: now[0])
     red = Red(clock=lambda: now[0])
-    events = sequence()
+    events = sequence(missed_reply=missed_reply)
     index = 0
     capture_frame = None
+    miss_hp = None
+    miss_result_time = None
+    longest_menu = menu_frames = 0
     snapshots = {
         33: "callsign",
         3: "cq",
@@ -31,6 +34,19 @@ def main():
             while engine.actions:
                 red.action(engine.actions.pop(0))
             red.tick(1)
+            menu_frames = menu_frames + 1 if red.selecting_move else 0
+            longest_menu = max(longest_menu, menu_frames)
+            if red.active_missed:
+                if miss_hp is None:
+                    miss_hp = (red.read16("wBattleMonHP"), red.read16("wEnemyMonHP"))
+                assert miss_hp == (red.read16("wBattleMonHP"), red.read16("wEnemyMonHP")), (
+                    "Inferred missed attack changed HP"
+                )
+                if red.prompt == "result" and miss_result_time is None:
+                    miss_result_time = now[0]
+                if miss_result_time is not None and now[0] >= miss_result_time + 0.5:
+                    red.image().resize((640, 576)).save(ROOT / "data/verified-miss.png")
+                    miss_result_time = float("inf")
             if red.capture_seen and capture_frame is None:
                 capture_frame = frame
             if capture_frame is not None and frame == capture_frame + 90:
@@ -45,13 +61,15 @@ def main():
                 )
         assert engine.state == "success", engine.state
         assert engine.opponent == "JA1ABC"
-        assert engine.attacks == 3, engine.attacks
+        assert engine.attacks == (2 if missed_reply else 3), engine.attacks
         assert len(engine.dex.rows()) == 1
         assert red.mode == "victory", red.mode
         assert red.capture_seen
         assert red.read("wPartyCount") == 2
         assert len(engine.dex.collection()) == 1
         assert red.damage_events == 3, red.damage_events
+        assert red.missed_events == int(missed_reply), red.missed_events
+        assert longest_menu < 60, "Automatic selectors are still replacing native battle text"
         from pyboy.plugins.game_wrapper_pokemon_gen1_constants import (
             POKEMON_TEXT_ENCODING,
         )
@@ -65,7 +83,8 @@ def main():
             encoded = [POKEMON_TEXT_ENCODING[c] for c in expected] + [0x50]
             assert list(red.p.memory[address : address + len(encoded)]) == encoded, symbol
         print(
-            "PASS: real 15-second slots; 3 partner moves + 3 transmitted moves + capture; real ROM victory; exactly 1 logged QSO."
+            f"PASS: real 15-second slots; {engine.attacks} partner moves + 3 transmitted moves "
+            f"+ {red.missed_events} native misses + capture; menus under 1s; exactly 1 logged QSO."
         )
     finally:
         red.close()
@@ -73,4 +92,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    verify()
+    verify(missed_reply=True)

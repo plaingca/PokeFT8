@@ -5,10 +5,10 @@ import datetime as dt
 import protocol as wire
 
 
-def real_sequence():
+def real_sequence(missed_reply=False):
     """15-second alternating slots; decodes arrive near the receive-slot end."""
     end = dt.datetime.now(dt.timezone.utc)
-    return [
+    events = [
         (0, wire.status("CQ N0CALL CN79", True)),
         (13.2, wire.status("", False)),
         (27, wire.status("", False, True)),
@@ -35,6 +35,11 @@ def real_sequence():
         (119, wire.logged("JA1ABC", end)),
         (119.1, wire.logged("JA1ABC", end)),
     ]
+    if missed_reply:
+        # A complete receive/decode cycle without a partner packet, followed by
+        # a real retry. Infer one miss instead of inventing a reception.
+        events = [(t, packet) for t, packet in events if t not in (57.5, 57.6)]
+    return events
 
 
 def sequence():

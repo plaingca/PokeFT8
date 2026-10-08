@@ -9,4 +9,4 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m unittest discover -v
-      - run: python -m compileall -q app.py engine.py protocol.py rom.py game_audio.py demo.py prepare_reference.py ecology.py
+      - run: python -m compileall -q app.py engine.py protocol.py rom.py game_audio.py demo.py prepare_reference.py ecology.py runtime_paths.py package_check.py packaging
